@@ -7,7 +7,6 @@ data received via subscription back to the serial port.
 
 from __future__ import annotations
 
-import math
 import threading
 import time
 
@@ -19,7 +18,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from std_msgs.msg import String, UInt8MultiArray
 
-from bme_common_msgs.msg import GnssSolution, HPPOSLLH, PVT
+from bme_common_msgs.msg import HPPOSLLH, PVT
 
 from ublox_gnss_driver.ubx_parser import (
     UBX_SYNC_1,
@@ -57,7 +56,6 @@ class RtkRoverNode(Node):
         # Publishers
         self._pub_pvt = self.create_publisher(PVT, 'pvt', 10)
         self._pub_hpposllh = self.create_publisher(HPPOSLLH, 'hpposllh', 10)
-        self._pub_gnss_solution = self.create_publisher(GnssSolution, 'gnss_solution', 10)
         self._pub_navsatfix = self.create_publisher(NavSatFix, 'navsatfix', 10)
         self._pub_utm = self.create_publisher(Odometry, 'utm', 10)
         self._pub_gngga = self.create_publisher(String, 'gngga', 10)
@@ -69,7 +67,6 @@ class RtkRoverNode(Node):
 
         # State shared between PVT and HPPOSLLH handlers
         self._fix_status: int = 0
-        self._num_sv: int = 0
 
         # UTM converter (lazy-init)
         self._utm_proj = None
@@ -158,7 +155,6 @@ class RtkRoverNode(Node):
 
         # Update shared state for HPPOSLLH handler
         self._fix_status = pvt.fix_status
-        self._num_sv = pvt.num_sv
 
         # Publish PVT message
         msg = PVT()
@@ -208,7 +204,7 @@ class RtkRoverNode(Node):
         self._pub_gpstime.publish(gpstime_msg)
 
     def _handle_hpposllh(self, hp: NavHpposllh) -> None:
-        """Process NAV-HPPOSLLH data and publish HPPOSLLH, GnssSolution, NavSatFix, Odometry."""
+        """Process NAV-HPPOSLLH data and publish HPPOSLLH, NavSatFix, Odometry."""
         now = self.get_clock().now().to_msg()
 
         # Compute high-precision coordinates
@@ -241,24 +237,6 @@ class RtkRoverNode(Node):
 
         # UTM conversion
         easting, northing = self._to_utm(lat_hp_deg, lon_hp_deg)
-
-        # Publish GnssSolution
-        gnss_msg = GnssSolution()
-        gnss_msg.header.stamp = now
-        gnss_msg.header.frame_id = self._frame_id
-        gnss_msg.itow = hp.itow
-        gnss_msg.num_sv = self._num_sv
-        gnss_msg.position_rtk_status = self._fix_status
-        gnss_msg.longitude = lon_hp_deg
-        gnss_msg.latitude = lat_hp_deg
-        gnss_msg.utm_easting = easting
-        gnss_msg.utm_northing = northing
-        gnss_msg.height = height_hp_m
-        gnss_msg.h_acc = round(hp.h_acc * 0.1)  # 0.1mm → mm (uint32)
-        gnss_msg.v_acc = round(hp.v_acc * 0.1)
-        gnss_msg.heading_rtk_status = 0
-        gnss_msg.heading_deg = 0.0
-        self._pub_gnss_solution.publish(gnss_msg)
 
         # Publish NavSatFix
         navsat_msg = NavSatFix()

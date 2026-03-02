@@ -18,7 +18,7 @@ import serial
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu
 
-from bme_common_msgs.msg import GnssSolution, RELPOSNED
+from bme_common_msgs.msg import GnssSolution, HPPOSLLH, PVT, RELPOSNED
 
 from ublox_gnss_driver.ubx_parser import (
     UBX_SYNC_1,
@@ -61,15 +61,23 @@ class MovingBaseNode(Node):
         self._pub_relposned = self.create_publisher(RELPOSNED, 'relposned', 10)
         self._pub_heading_imu = self.create_publisher(Imu, 'heading_imu', 10)
         self._pub_gnss_odom = self.create_publisher(Odometry, 'gnss_odom', 10)
+        self._pub_gnss_solution = self.create_publisher(GnssSolution, 'gnss_solution', 10)
 
-        # Subscribe to GnssSolution from rtk_rover_node for UTM position
+        # Subscribe to PVT and HPPOSLLH from rtk_rover_node
+        self.create_subscription(PVT, 'pvt', self._pvt_callback, 10)
         self.create_subscription(
-            GnssSolution, 'gnss_solution', self._gnss_solution_callback, 10)
+            HPPOSLLH, 'hpposllh', self._hpposllh_callback, 10)
 
-        # Cached position from GnssSolution
-        self._utm_easting: float = 0.0
-        self._utm_northing: float = 0.0
-        self._height: float = 0.0
+        # Cached state from PVT
+        self._cached_fix_status: int = 0
+        self._cached_num_sv: int = 0
+
+        # Cached position (built from HPPOSLLH, heading fields left at 0)
+        self._cached_position: GnssSolution | None = None
+
+        # UTM converter (lazy-init)
+        self._utm_proj = None
+        self._utm_zone: int = 0
 
         # Serial port
         self._ser: serial.Serial | None = None
@@ -186,26 +194,88 @@ class MovingBaseNode(Node):
         imu_msg.linear_acceleration_covariance[0] = -1.0
         self._pub_heading_imu.publish(imu_msg)
 
+        # Publish integrated GnssSolution (position + heading)
+        cached = self._cached_position
+        if cached is not None:
+            gnss_msg = GnssSolution()
+            gnss_msg.header.stamp = now
+            gnss_msg.header.frame_id = cached.header.frame_id
+            gnss_msg.itow = cached.itow
+            gnss_msg.num_sv = cached.num_sv
+            gnss_msg.position_rtk_status = cached.position_rtk_status
+            gnss_msg.longitude = cached.longitude
+            gnss_msg.latitude = cached.latitude
+            gnss_msg.utm_easting = cached.utm_easting
+            gnss_msg.utm_northing = cached.utm_northing
+            gnss_msg.height = cached.height
+            gnss_msg.h_acc = cached.h_acc
+            gnss_msg.v_acc = cached.v_acc
+            gnss_msg.heading_deg = rp.heading_deg
+            gnss_msg.heading_rtk_status = rp.fix_status
+            self._pub_gnss_solution.publish(gnss_msg)
+
         # Publish Odometry (UTM position + heading)
         odom_msg = Odometry()
         odom_msg.header.stamp = now
         odom_msg.header.frame_id = self._frame_id
-        odom_msg.pose.pose.position.x = self._utm_easting
-        odom_msg.pose.pose.position.y = self._utm_northing
-        odom_msg.pose.pose.position.z = self._height
+        if cached is not None:
+            odom_msg.pose.pose.position.x = cached.utm_easting
+            odom_msg.pose.pose.position.y = cached.utm_northing
+            odom_msg.pose.pose.position.z = cached.height
         odom_msg.pose.pose.orientation.x = qx
         odom_msg.pose.pose.orientation.y = qy
         odom_msg.pose.pose.orientation.z = qz
         odom_msg.pose.pose.orientation.w = qw
         self._pub_gnss_odom.publish(odom_msg)
 
-    # ---- GnssSolution callback ----
+    # ---- PVT / HPPOSLLH callbacks ----
 
-    def _gnss_solution_callback(self, msg: GnssSolution) -> None:
-        """Cache UTM position from rtk_rover_node's GnssSolution."""
-        self._utm_easting = msg.utm_easting
-        self._utm_northing = msg.utm_northing
-        self._height = msg.height
+    def _pvt_callback(self, msg: PVT) -> None:
+        """Cache fix status and satellite count from rtk_rover_node's PVT."""
+        self._cached_fix_status = msg.fix_status
+        self._cached_num_sv = msg.num_sv
+
+    def _hpposllh_callback(self, msg: HPPOSLLH) -> None:
+        """Build and cache a position-only GnssSolution from HPPOSLLH."""
+        lon_hp_deg = msg.lon * 1e-7 + msg.lon_hp * 1e-9
+        lat_hp_deg = msg.lat * 1e-7 + msg.lat_hp * 1e-9
+        height_hp_m = msg.height * 1e-3 + msg.height_hp * 1e-4
+        easting, northing = self._to_utm(lat_hp_deg, lon_hp_deg)
+
+        gnss = GnssSolution()
+        gnss.header.stamp = msg.header.stamp
+        gnss.header.frame_id = msg.header.frame_id
+        gnss.itow = msg.itow
+        gnss.num_sv = self._cached_num_sv
+        gnss.position_rtk_status = self._cached_fix_status
+        gnss.longitude = lon_hp_deg
+        gnss.latitude = lat_hp_deg
+        gnss.utm_easting = easting
+        gnss.utm_northing = northing
+        gnss.height = height_hp_m
+        gnss.h_acc = round(msg.h_acc * 0.1)  # 0.1mm -> mm (uint32)
+        gnss.v_acc = round(msg.v_acc * 0.1)
+        self._cached_position = gnss
+
+    # ---- UTM conversion ----
+
+    def _to_utm(self, lat: float, lon: float) -> tuple[float, float]:
+        """Convert latitude/longitude (degrees) to UTM easting/northing."""
+        try:
+            from pyproj import Proj
+        except ImportError:
+            self.get_logger().error(
+                'pyproj is not available. Activate the venv: '
+                'source ros2_ws/.venv/bin/activate')
+            return 0.0, 0.0
+
+        zone = int((lon + 180.0) / 6.0) + 1
+        if zone != self._utm_zone or self._utm_proj is None:
+            self._utm_zone = zone
+            self._utm_proj = Proj(proj='utm', zone=zone, ellps='WGS84')
+
+        easting, northing = self._utm_proj(lon, lat)
+        return easting, northing
 
     # ---- Cleanup ----
 
