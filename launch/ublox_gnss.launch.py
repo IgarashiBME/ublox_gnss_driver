@@ -11,7 +11,7 @@ def generate_launch_description() -> LaunchDescription:
         # Launch arguments
         DeclareLaunchArgument(
             'ntrip_port',
-            default_value='/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00',
+            default_value='/dev/serial/by-path/pci-0000:00:14.0-usb-0:4.3:1.0',
             description='Serial port for NTRIP/PVT receiver',
         ),
         DeclareLaunchArgument(
@@ -21,7 +21,7 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             'moving_base_port',
-            default_value='/dev/ttyUSB0',
+            default_value='/dev/serial/by-path/pci-0000:00:14.0-usb-0:3.3:1.0',
             description='Serial port for Moving Base Rover',
         ),
         DeclareLaunchArgument(

@@ -61,7 +61,7 @@ class MovingBaseNode(Node):
         self._pub_relposned = self.create_publisher(RELPOSNED, 'relposned', 10)
         self._pub_heading_imu = self.create_publisher(Imu, 'heading_imu', 10)
         self._pub_gnss_odom = self.create_publisher(Odometry, 'gnss_odom', 10)
-        self._pub_gnss_solution = self.create_publisher(GnssSolution, 'gnss_solution', 10)
+        self._pub_gnss_solution = self.create_publisher(GnssSolution, '/gnss/solution', 10)
 
         # Subscribe to PVT and HPPOSLLH from rtk_rover_node
         self.create_subscription(PVT, 'pvt', self._pvt_callback, 10)
